@@ -1,0 +1,60 @@
+USAGE
+    pg_flamegraph.sh --pid <pid> --output-dir <dir> [OPTIONS]
+ 
+ 
+REQUIRED ARGUMENTS
+    --pid, -p <pid>
+        PID of the PostgreSQL backend process to profile.
+        Must be a running process accessible to the current user.
+ 
+    --output-dir, -o <dir>
+        Base directory where profiling output will be stored.
+        A timestamped subdirectory (YYYYMMDD_HHMMSS) is created inside it.
+        The directory is created automatically if it does not exist.
+ 
+OPTIONS
+    --profiler <perf|gdb>       (default: perf)
+        Backend to use for stack collection.
+ 
+          perf  On-CPU profiling via linux-perf.
+                Captures only time spent on-CPU.
+                Requires: perf, FlameGraph toolkit.
+ 
+          gdb   On+off-CPU stack sampling via gdb.
+                Captures time regardless of CPU state — useful for profiling
+                lock contention, I/O waits, and other off-CPU bottlenecks.
+                Requires: gdb, FlameGraph toolkit (stackcollapse-gdb.pl).
+ 
+    --frequency, -f <hz>        (default: 99)
+        Sampling frequency in Hz.
+        perf:  passed as -F to `perf record`.
+        gdb:   sleep interval between samples = 1 / frequency.
+        Lower values reduce overhead; higher values improve resolution.
+ 
+    --flamegraph-dir <path>     (default: /home/user/FlameGraph)
+        Path to a local clone of Brendan Gregg's FlameGraph toolkit.
+        Clone it with:
+            git clone https://github.com/brendangregg/FlameGraph.git ~/FlameGraph
+ 
+    --help, -h
+        Show this help and exit.
+ 
+OUTPUT FILES
+    <output_dir>/<timestamp>/
+        pg_perf.data        Raw perf data                    (perf only)
+        pg_perf.out         Perf script output               (perf only)
+        pg_gdb_raw.out      Raw gdb backtraces               (gdb only)
+        pg_folded.out       Folded stacks (both backends)
+        pg_flamegraph.svg   Final flamegraph                 (both backends)
+ 
+EXAMPLES
+    # On-CPU flamegraph using perf (default)
+    pg_flamegraph.sh --pid 12345 --output-dir /home/user/profiles
+ 
+    # Off-CPU capable flamegraph using gdb
+    pg_flamegraph.sh --pid 12345 --output-dir /home/user/profiles --profiler gdb
+ 
+    # Higher resolution, custom FlameGraph path
+    pg_flamegraph.sh --pid 12345 --output-dir /tmp/pg_prof \
+                     --profiler gdb --frequency 200 \
+                     --flamegraph-dir ~/tools/FlameGraph
