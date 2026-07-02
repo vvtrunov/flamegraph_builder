@@ -11,9 +11,10 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 PROFILER="perf"
 FREQUENCY=99
-FLAMEGRAPH_DIR="/home/user/FlameGraph"
+FLAMEGRAPH_DIR="/home/user/work/FlameGraph"
 PID=""
 OUTPUT_BASE=""
+TIMEOUT=""
 
 # ---------------------------------------------------------------------------
 # Help
@@ -53,6 +54,12 @@ OPTIONS
         gdb:   sleep interval between samples = 1 / frequency.
         Lower values reduce overhead; higher values improve resolution.
 
+    --timeout, -t <seconds>     (default: none)
+        Record for a fixed duration, then stop automatically.
+        When omitted, recording runs until you press ENTER.
+        When set, recording auto-stops after <seconds>; pressing ENTER
+        still stops it early. Useful for unattended/scripted profiling.
+
     --flamegraph-dir <path>     (default: /home/user/FlameGraph)
         Path to a local clone of Brendan Gregg's FlameGraph toolkit.
         Clone it with:
@@ -76,6 +83,9 @@ EXAMPLES
     # Off-CPU capable flamegraph using gdb
     pg_flamegraph.sh --pid 12345 --output-dir /home/user/profiles --profiler gdb
 
+    # Unattended capture: record for 30 seconds then stop automatically
+    pg_flamegraph.sh --pid 12345 --output-dir /home/user/profiles --timeout 30
+
     # Higher resolution, custom FlameGraph path
     pg_flamegraph.sh --pid 12345 --output-dir /tmp/pg_prof \
                      --profiler gdb --frequency 200 \
@@ -98,6 +108,8 @@ while [[ $# -gt 0 ]]; do
             PROFILER="$2"; shift 2 ;;
         --frequency|-f)
             FREQUENCY="$2"; shift 2 ;;
+        --timeout|-t)
+            TIMEOUT="$2"; shift 2 ;;
         --flamegraph-dir)
             FLAMEGRAPH_DIR="$2"; shift 2 ;;
         -h|--help)
@@ -138,6 +150,13 @@ if ! [[ "$FREQUENCY" =~ ^[0-9]+([.][0-9]+)?$ ]] || (( $(echo "$FREQUENCY <= 0" |
     exit 1
 fi
 
+if [[ -n "$TIMEOUT" ]]; then
+    if ! [[ "$TIMEOUT" =~ ^[0-9]+([.][0-9]+)?$ ]] || (( $(echo "$TIMEOUT <= 0" | bc -l) )); then
+        echo "Error: --timeout must be a positive number of seconds (got: '$TIMEOUT')." >&2
+        exit 1
+    fi
+fi
+
 # ---------------------------------------------------------------------------
 # Create timestamped output directory
 # ---------------------------------------------------------------------------
@@ -158,6 +177,11 @@ echo "============================================="
 echo "  PID        : $PID"
 echo "  Backend    : $PROFILER"
 echo "  Frequency  : ${FREQUENCY} Hz"
+if [[ -n "$TIMEOUT" ]]; then
+    echo "  Duration   : ${TIMEOUT}s (auto-stop)"
+else
+    echo "  Duration   : until ENTER"
+fi
 echo "  Out dir    : $OUT_DIR"
 echo "============================================="
 echo ""
@@ -202,11 +226,28 @@ check_deps_gdb() {
 }
 
 # ---------------------------------------------------------------------------
+# Stop-wait: block until the user presses ENTER, or — when --timeout is set —
+# until TIMEOUT seconds elapse (ENTER still stops early). The watchdog feeds a
+# newline to unblock this in either mode if the target process dies.
+# ---------------------------------------------------------------------------
+wait_for_stop() {
+    if [[ -n "$TIMEOUT" ]]; then
+        read -t "$TIMEOUT" -rp "    [recording...] auto-stop in ${TIMEOUT}s (ENTER to stop early) → " _ || true
+    else
+        read -rp "    [recording...] Press ENTER to stop → " _ || true
+    fi
+}
+
+# ---------------------------------------------------------------------------
 # Step 4 — record
 # ---------------------------------------------------------------------------
 echo "[4] Starting $PROFILER recording for PID $PID ..."
 echo "    → Run your workload now (COPY, query, etc.)"
-echo "    → Press ENTER when you want to stop recording."
+if [[ -n "$TIMEOUT" ]]; then
+    echo "    → Recording will stop automatically after ${TIMEOUT}s (or press ENTER to stop early)."
+else
+    echo "    → Press ENTER when you want to stop recording."
+fi
 echo ""
 
 case "$PROFILER" in
@@ -234,7 +275,7 @@ case "$PROFILER" in
         ) &
         WATCHDOG_PID=$!
 
-        read -rp "    [recording...] Press ENTER to stop → "
+        wait_for_stop
 
         kill "$WATCHDOG_PID" 2>/dev/null || true
         sudo kill -SIGINT "$PROFILER_PID" 2>/dev/null || true
@@ -282,7 +323,7 @@ case "$PROFILER" in
         ) &
         WATCHDOG_PID=$!
 
-        read -rp "    [recording...] Press ENTER to stop → "
+        wait_for_stop
 
         touch "$STOP_FLAG"
         wait "$PROFILER_PID"  2>/dev/null || true
@@ -356,5 +397,5 @@ echo "============================================="
 echo ""
 echo "  View locally : xdg-open $SVG"
 echo "  Serve remote : python3 -m http.server 8080 --directory $OUT_DIR"
-echo "  Copy locally : scp user@192.168.64.3:$SVG ~/pg_flamegraph.svg"
+echo "  Copy locally : scp user@192.168.65.2:$SVG ~/pg_flamegraph.svg"
 echo "============================================="
