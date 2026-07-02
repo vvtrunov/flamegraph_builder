@@ -1,6 +1,7 @@
 """Command-line interface: parse + validate args, then run the orchestrator."""
 
 import argparse
+import os
 import re
 import subprocess
 import sys
@@ -42,8 +43,9 @@ def build_parser() -> argparse.ArgumentParser:
                    help="Hz: perf -F, or gdb sample interval = 1/frequency (default: 99).")
     p.add_argument("--merge-all", action="store_true",
                    help="Also merge every process's final into one grand-total flamegraph.")
-    p.add_argument("--flamegraph-dir", default=config.DEFAULT_FLAMEGRAPH_DIR,
-                   help=f"FlameGraph toolkit clone (default: {config.DEFAULT_FLAMEGRAPH_DIR}).")
+    p.add_argument("--flamegraph-dir", default=None,
+                   help=("FlameGraph toolkit clone. If omitted, resolved from "
+                         "$FLAMEGRAPH_DIR, then flamegraph.pl on $PATH, then ~/FlameGraph."))
     return p
 
 
@@ -66,13 +68,14 @@ def parse_args(argv) -> Config:
 
     return Config(
         name_regex=args.name,
-        out_base=args.out,
+        # expanduser so a passed "~/prof" works even when the shell didn't expand it.
+        out_base=os.path.abspath(os.path.expanduser(args.out)),
         profiler=args.profiler,
         frequency=args.frequency,
         duration=args.duration,
         interval=args.interval,
         merge_all=args.merge_all,
-        flamegraph_dir=args.flamegraph_dir,
+        flamegraph_dir=config.resolve_flamegraph_dir(args.flamegraph_dir),
     )
 
 

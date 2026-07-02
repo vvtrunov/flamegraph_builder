@@ -11,7 +11,9 @@ set -uo pipefail
 # ---------------------------------------------------------------------------
 PROFILER="perf"
 FREQUENCY=99
-FLAMEGRAPH_DIR="/home/user/work/FlameGraph"
+# No hardcoded path. Inherit an exported $FLAMEGRAPH_DIR if present; otherwise it is
+# resolved below (flamegraph.pl on $PATH, then ~/FlameGraph). --flamegraph-dir overrides.
+FLAMEGRAPH_DIR="${FLAMEGRAPH_DIR:-}"
 PID=""
 OUTPUT_BASE=""
 TIMEOUT=""
@@ -60,8 +62,10 @@ OPTIONS
         When set, recording auto-stops after <seconds>; pressing ENTER
         still stops it early. Useful for unattended/scripted profiling.
 
-    --flamegraph-dir <path>     (default: /home/user/FlameGraph)
+    --flamegraph-dir <path>     (default: auto-resolved)
         Path to a local clone of Brendan Gregg's FlameGraph toolkit.
+        If omitted, resolved from $FLAMEGRAPH_DIR, then flamegraph.pl on
+        $PATH, then ~/FlameGraph.
         Clone it with:
             git clone https://github.com/brendangregg/FlameGraph.git ~/FlameGraph
 
@@ -154,6 +158,18 @@ if [[ -n "$TIMEOUT" ]]; then
     if ! [[ "$TIMEOUT" =~ ^[0-9]+([.][0-9]+)?$ ]] || (( $(echo "$TIMEOUT <= 0" | bc -l) )); then
         echo "Error: --timeout must be a positive number of seconds (got: '$TIMEOUT')." >&2
         exit 1
+    fi
+fi
+
+# ---------------------------------------------------------------------------
+# Resolve FlameGraph toolkit location (no hardcoded absolute path).
+# Precedence: --flamegraph-dir > $FLAMEGRAPH_DIR > flamegraph.pl on $PATH > ~/FlameGraph
+# ---------------------------------------------------------------------------
+if [[ -z "$FLAMEGRAPH_DIR" ]]; then
+    if fg_pl=$(command -v flamegraph.pl 2>/dev/null); then
+        FLAMEGRAPH_DIR=$(dirname "$fg_pl")
+    else
+        FLAMEGRAPH_DIR="$HOME/FlameGraph"
     fi
 fi
 

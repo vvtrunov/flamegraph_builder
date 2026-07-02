@@ -60,7 +60,7 @@ python3 -m multi_flamegraph --name nginx --out ./prof --merge-all \
 | `--interval`, `-i` | `5` | Seconds slept between cycles. |
 | `--frequency`, `-f` | `99` | Hz: perf `-F`, or gdb sample interval = `1/frequency`. |
 | `--merge-all` | off | Also build one grand-total flamegraph across all processes. |
-| `--flamegraph-dir` | `/home/user/work/FlameGraph` | FlameGraph toolkit clone. |
+| `--flamegraph-dir` | auto | FlameGraph toolkit clone. Auto-resolved (see below) if omitted. |
 
 ## Output layout
 
@@ -95,7 +95,11 @@ python3 -m multi_flamegraph --name nginx --out ./prof --merge-all \
 
 - Python 3 (standard library only).
 - `perf` (for `--profiler perf`) or `gdb` (for `--profiler gdb`).
-- A clone of [FlameGraph](https://github.com/brendangregg/FlameGraph) (`--flamegraph-dir`).
+- A clone of [FlameGraph](https://github.com/brendangregg/FlameGraph). No absolute path
+  is baked in; the toolkit is located in this order:
+  `--flamegraph-dir` → `$FLAMEGRAPH_DIR` → `flamegraph.pl` on `$PATH` → `~/FlameGraph`.
+  So on a new machine, either clone it to `~/FlameGraph`, export `FLAMEGRAPH_DIR`, or pass
+  `--flamegraph-dir /path/to/FlameGraph`.
 - **sudo** — both backends attach to other processes, so root is required. You are
   prompted once at startup; a keepalive holds the credential for long runs.
 
