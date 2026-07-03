@@ -7,7 +7,7 @@ import subprocess
 import sys
 
 from . import config
-from .config import Config
+from .config import Config, Group
 from .deps import check_dependencies, warm_up_sudo, DependencyError
 
 
@@ -25,11 +25,21 @@ def build_parser() -> argparse.ArgumentParser:
             "--profiler gdb\n\n"
             "  # Aggregate all matches into one grand-total flamegraph too\n"
             "  python3 -m multi_flamegraph --name nginx --out ./prof --merge-all\n\n"
+            "  # Group processes via a JSON config (per-group subdir + merge policy)\n"
+            "  python3 -m multi_flamegraph --config groups.json --out ./prof\n\n"
+            "  groups.json = [{\"regexp\": \"postgres.*COPY\", \"suffix\": \"copy\", "
+            "\"merge_all\": true},\n"
+            "                 {\"regexp\": \"nginx: worker\", \"suffix\": \"web\"}]\n\n"
             "NOTE: per-process dirs are keyed by PID; a reused PID maps to the same dir."
         ),
     )
-    p.add_argument("--name", "-n", required=True,
-                   help="Regex matched against each process's full command line.")
+    # Exactly one of --name (single implicit group) or --config (grouped) is required.
+    source = p.add_mutually_exclusive_group(required=True)
+    source.add_argument("--name", "-n",
+                        help="Regex matched against each process's full command line.")
+    source.add_argument("--config",
+                        help="Path to a JSON file defining groups (list of "
+                             "{regexp, suffix, merge_all?}). Mutually exclusive with --name.")
     p.add_argument("--out", "-o", required=True,
                    help="Base output dir; a timestamped run dir is created inside it.")
     p.add_argument("--profiler", choices=["perf", "gdb"],
@@ -57,24 +67,30 @@ def _positive(name: str, value: float) -> None:
 def parse_args(argv) -> Config:
     args = build_parser().parse_args(argv)
 
-    # Validate numbers and the regex up front so failures are immediate and clear.
+    # Validate numbers up front so failures are immediate and clear.
     _positive("duration", args.duration)
     _positive("interval", args.interval)
     _positive("frequency", args.frequency)
-    try:
-        re.compile(args.name)
-    except re.error as exc:
-        raise ValueError(f"--name is not a valid regex: {exc}")
+
+    # Build the group list: --name is one implicit group (empty suffix = flat layout);
+    # --config is many groups. load_groups validates its own structure/values.
+    if args.config is not None:
+        groups = tuple(config.load_groups(args.config, args.merge_all))
+    else:
+        try:
+            re.compile(args.name)
+        except re.error as exc:
+            raise ValueError(f"--name is not a valid regex: {exc}")
+        groups = (Group(regexp=args.name, suffix="", merge_all=args.merge_all),)
 
     return Config(
-        name_regex=args.name,
+        groups=groups,
         # expanduser so a passed "~/prof" works even when the shell didn't expand it.
         out_base=os.path.abspath(os.path.expanduser(args.out)),
         profiler=args.profiler,
         frequency=args.frequency,
         duration=args.duration,
         interval=args.interval,
-        merge_all=args.merge_all,
         flamegraph_dir=config.resolve_flamegraph_dir(args.flamegraph_dir),
     )
 
@@ -103,11 +119,11 @@ def main(argv=None) -> int:
               file=sys.stderr)
         return 1
 
-    run_dir = Orchestrator(cfg).run()
+    run_dir, ok = Orchestrator(cfg).run()
 
     print("\n=============================================")
-    print(f"  Done. Output in: {run_dir}")
-    print(f"  View an SVG   : xdg-open {run_dir}/pid_<PID>/final.svg")
+    print(f"  {'Done' if ok else 'Stopped (group overlap)'}. Output in: {run_dir}")
+    print(f"  View SVGs     : find {run_dir} -name '*.svg'")
     print(f"  Serve remote  : python3 -m http.server 8080 --directory {run_dir}")
     print("=============================================")
-    return 0
+    return 0 if ok else 1

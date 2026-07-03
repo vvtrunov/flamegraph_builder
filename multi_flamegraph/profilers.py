@@ -35,6 +35,7 @@ def _collapse(cfg: Config, script: str, raw_path: str, out_folded: str) -> bool:
 
 
 def _profile_perf(cfg: Config, pid: int, out_folded: str) -> bool:
+    errlog = _sibling(out_folded, ".perf_errors.log")
     # Managed manually (not TemporaryDirectory) because perf writes perf.data as
     # root; cleanup must also run as root to remove it.
     tmp = tempfile.mkdtemp(prefix="mflame_perf_")
@@ -42,25 +43,29 @@ def _profile_perf(cfg: Config, pid: int, out_folded: str) -> bool:
         data = os.path.join(tmp, "perf.data")
         script_out = os.path.join(tmp, "perf.out")
 
-        # `-- sleep <dur>` bounds the recording to a fixed duration; perf stops when
-        # sleep exits (or earlier if the target dies).
-        subprocess.run(
-            ["sudo", "perf", "record",
-             "-F", _int_str(cfg.frequency),
-             "-p", str(pid),
-             "-g", "--call-graph", "dwarf",
-             "-o", data,
-             "--", "sleep", _num_str(cfg.duration)],
-            stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL,
-        )
-        if not os.path.exists(data):
-            return False
+        # Capture perf's stderr so an empty result is diagnosable (attach denied,
+        # "no samples", etc.) instead of a silent empty file.
+        with open(errlog, "w") as err:
+            # `-- sleep <dur>` bounds the recording to a fixed duration; perf stops
+            # when sleep exits (or earlier if the target dies).
+            subprocess.run(
+                ["sudo", "perf", "record",
+                 "-F", _int_str(cfg.frequency),
+                 "-p", str(pid),
+                 "-g", "--call-graph", "dwarf",
+                 "-o", data,
+                 "--", "sleep", _num_str(cfg.duration)],
+                stdout=subprocess.DEVNULL, stderr=err,
+            )
+            if not os.path.exists(data):
+                return _keep_on_failure(errlog, False)
 
-        # script_out is opened by us (user-owned); perf script writes into that fd.
-        with open(script_out, "w") as so:
-            subprocess.run(["sudo", "perf", "script", "-i", data],
-                           stdout=so, stderr=subprocess.DEVNULL)
-        return _collapse(cfg, "stackcollapse-perf.pl", script_out, out_folded)
+            # script_out is opened by us (user-owned); perf script writes into it.
+            with open(script_out, "w") as so:
+                subprocess.run(["sudo", "perf", "script", "-i", data],
+                               stdout=so, stderr=err)
+            ok = _collapse(cfg, "stackcollapse-perf.pl", script_out, out_folded)
+        return _keep_on_failure(errlog, ok)
     finally:
         # perf.data is root-owned, so remove the tree as root, then mop up as user.
         subprocess.run(["sudo", "rm", "-rf", tmp],
@@ -70,11 +75,12 @@ def _profile_perf(cfg: Config, pid: int, out_folded: str) -> bool:
 
 # Poor-man's-profiler loop (matches stackcollapse-gdb.pl's expected input). Args:
 #   $1 = pid, $2 = duration seconds (int), $3 = sleep between samples.
+# gdb stderr is left un-redirected so the caller can capture attach failures.
 _GDB_LOOP = (
     'deadline=$(( $(date +%s) + $2 ));'
     'while [ "$(date +%s)" -lt "$deadline" ]; do '
     '  kill -0 "$1" 2>/dev/null || break; '
-    "  gdb -ex 'set pagination 0' -ex 'thread apply all bt' -batch -p \"$1\" 2>/dev/null; "
+    "  gdb -ex 'set pagination 0' -ex 'thread apply all bt' -batch -p \"$1\"; "
     '  sleep "$3"; '
     'done'
 )
@@ -83,17 +89,41 @@ _GDB_LOOP = (
 def _profile_gdb(cfg: Config, pid: int, out_folded: str) -> bool:
     sleep_between = 1.0 / cfg.frequency
     dur_seconds = max(1, int(round(cfg.duration)))  # gdb sampling is coarse; whole secs
-    with tempfile.TemporaryDirectory(prefix="mflame_gdb_") as tmp:
-        raw = os.path.join(tmp, "gdb_raw.out")
-        # raw is opened by us (user-owned); the root loop writes into that fd, so no
-        # root-owned files are left behind — plain TemporaryDirectory cleanup works.
-        with open(raw, "w") as raw_fh:
-            subprocess.run(
-                ["sudo", "bash", "-c", _GDB_LOOP, "bash",
-                 str(pid), str(dur_seconds), _num_str(sleep_between)],
-                stdout=raw_fh, stderr=subprocess.DEVNULL,
-            )
-        return _collapse(cfg, "stackcollapse-gdb.pl", raw, out_folded)
+    raw = _sibling(out_folded, ".gdb_raw.txt")
+    errlog = _sibling(out_folded, ".gdb_errors.log")
+    # raw/errlog are opened by us (user-owned); the root loop writes into those fds,
+    # so no root-owned files are left behind.
+    with open(raw, "w") as raw_fh, open(errlog, "w") as err_fh:
+        subprocess.run(
+            ["sudo", "bash", "-c", _GDB_LOOP, "bash",
+             str(pid), str(dur_seconds), _num_str(sleep_between)],
+            stdout=raw_fh, stderr=err_fh,
+        )
+    ok = _collapse(cfg, "stackcollapse-gdb.pl", raw, out_folded)
+    if ok:
+        _quiet_remove(raw)  # success: keep only the folded to bound disk
+    # else: keep raw next to the empty folded so the failure can be inspected.
+    return _keep_on_failure(errlog, ok)
+
+
+def _sibling(out_folded: str, suffix: str) -> str:
+    """Path next to out_folded: iter_0003.folded -> iter_0003<suffix>."""
+    base = out_folded[:-len(".folded")] if out_folded.endswith(".folded") else out_folded
+    return base + suffix
+
+
+def _keep_on_failure(errlog: str, ok: bool) -> bool:
+    """Drop the error log on success (or if empty); keep it when folded came out empty."""
+    if ok or os.path.getsize(errlog) == 0:
+        _quiet_remove(errlog)
+    return ok
+
+
+def _quiet_remove(path: str) -> None:
+    try:
+        os.remove(path)
+    except OSError:
+        pass
 
 
 def _int_str(value: float) -> str:

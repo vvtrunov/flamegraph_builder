@@ -47,35 +47,74 @@ python3 -m multi_flamegraph --name 'postgres.*COPY' --out ./prof --profiler gdb
 # Aggregate every match into one grand-total flamegraph as well
 python3 -m multi_flamegraph --name nginx --out ./prof --merge-all \
         --duration 5 --interval 3
+
+# Multiple isolated groups via a JSON config (per-group subdir + merge policy)
+python3 -m multi_flamegraph --config groups.json --out ./prof --profiler gdb
 ```
 
 ### Options
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `--name`, `-n` | *required* | Regex matched against each process's full command line. |
+| `--name`, `-n` | *one of* | Regex matched against each process's full command line (single implicit group). |
+| `--config` | *one of* | JSON file defining groups. **Mutually exclusive** with `--name`; exactly one required. |
 | `--out`, `-o` | *required* | Base dir; a timestamped run dir is created inside it. |
 | `--profiler` | `perf` | `perf` (on-CPU) or `gdb` (combined on+off-CPU). |
 | `--duration`, `-d` | `5` | Seconds sampled per process per iteration. |
 | `--interval`, `-i` | `5` | Seconds slept between cycles. |
 | `--frequency`, `-f` | `99` | Hz: perf `-F`, or gdb sample interval = `1/frequency`. |
-| `--merge-all` | off | Also build one grand-total flamegraph across all processes. |
+| `--merge-all` | off | Merge each group's finals into a per-group flamegraph. With `--config`, this is the *default* for groups that omit `merge_all`. Never merges across groups. |
 | `--flamegraph-dir` | auto | FlameGraph toolkit clone. Auto-resolved (see below) if omitted. |
+
+## Groups (`--config`)
+
+Profile many processes at once while keeping results **logically separated**. The config is
+a JSON **list** of groups; each has its own regexp, output subdirectory, and merge policy:
+
+```json
+[
+  { "regexp": "postgres.*COPY", "suffix": "copy_backends", "merge_all": true },
+  { "regexp": "nginx: worker",  "suffix": "web" }
+]
+```
+
+- `regexp` (required) — matched against the full command line.
+- `suffix` (required) — the group's output subdirectory; a single path component, unique.
+- `merge_all` (optional bool) — per-group merge; defaults to the `--merge-all` flag.
+
+Merging happens **within** a group only, never across groups. A process whose command line
+matches **more than one group is a fatal error**: the run stops (already-collected data is
+still finalized) and exits non-zero — keep your group regexps disjoint.
 
 ## Output layout
 
+With `--config` (one subdirectory per group):
 ```
 <out>/<YYYYMMDD_HHMMSS>/
-  pid_<PID>/
-    iter_0001.cmdline.txt   command line captured at that iteration's start
-    iter_0001.folded        layer-1 folded stacks for that sample
-    ...
-    final.folded            layer-2 merge of all iterations
-    final.svg               flamegraph of final.folded
-  all/                      only with --merge-all
-    all.folded              merge of every pid_*/final.folded
-    all.svg
+  <suffix>/                 # e.g. copy_backends
+    pid_<PID>/
+      iter_0001.cmdline.txt command line captured at that iteration's start
+      iter_0001.folded      layer-1 folded stacks for that sample
+      ...
+      final.folded          layer-2 merge of all iterations
+      final.svg             flamegraph of final.folded
+    all/                    only if this group's merge_all is true
+      all.folded            merge of this group's pid_*/final.folded
+      all.svg
 ```
+
+With `--name` (single implicit group — flat, unchanged):
+```
+<out>/<YYYYMMDD_HHMMSS>/
+  pid_<PID>/ ...
+  all/ ...                  only with --merge-all
+```
+
+If an iteration produces **no stacks**, the folded file is empty and the backend's
+diagnostics are kept next to it for inspection: `iter_NNNN.gdb_raw.txt` +
+`iter_NNNN.gdb_errors.log` (gdb) or `iter_NNNN.perf_errors.log` (perf). On success
+these are removed to keep disk bounded. An empty result under **perf** is usually
+just an idle (off-CPU) process — see below.
 
 ## Codebase map
 
@@ -83,13 +122,13 @@ python3 -m multi_flamegraph --name nginx --out ./prof --merge-all \
 |------|----------------|
 | `__main__.py` | Entry point (`python3 -m multi_flamegraph`). |
 | `cli.py` | Argument parsing, validation, wiring. |
-| `config.py` | `Config` dataclass and default constants. |
+| `config.py` | `Config`/`Group` dataclasses, defaults, and `load_groups()` (config JSON). |
 | `deps.py` | Backend/toolkit checks; sudo warm-up + keepalive. |
-| `discovery.py` | `scan_processes()` via `ps`; regex match on the full command line. |
+| `discovery.py` | `list_processes()` via `ps`; `match_group()` + `GroupOverlapError`. |
 | `folded.py` | **Reusable** folded I/O + `merge_folded()` (used at both merge levels). |
 | `profilers.py` | `profile_once()` for the perf and gdb backends → folded. |
 | `render.py` | `render_flamegraph()` wrapping `flamegraph.pl`. |
-| `orchestrator.py` | Run loop: scan → parallel sample → repeat → finalize + merge-all. |
+| `orchestrator.py` | Run loop: scan → assign to groups → parallel sample → finalize per group. |
 
 ## Requirements
 
