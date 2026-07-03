@@ -9,6 +9,8 @@ Merging never crosses group boundaries.
 """
 
 import os
+import signal
+import sys
 import threading
 from datetime import datetime
 from typing import Dict, List, Tuple
@@ -16,7 +18,7 @@ from typing import Dict, List, Tuple
 from .config import Config, Group
 from . import discovery, folded, render
 from .discovery import GroupOverlapError
-from .profilers import profile_once
+from .profilers import profile_once, terminate_active_children
 
 
 class _Proc:
@@ -62,6 +64,7 @@ class Orchestrator:
         os.makedirs(self.run_dir, exist_ok=True)
         for gs in self.groups:
             os.makedirs(gs.base_dir, exist_ok=True)
+        self._install_signal_handlers()
         self._print_header()
         self._start_enter_listener()
 
@@ -71,11 +74,8 @@ class Orchestrator:
             while not self.stop.is_set():
                 cycle += 1
                 self._run_cycle(cycle)
-                # Interruptible sleep between cycles; ENTER wakes it immediately.
+                # Interruptible sleep between cycles; a stop signal wakes it.
                 self.stop.wait(self.cfg.interval)
-        except KeyboardInterrupt:
-            # Ctrl-C is a valid stop signal too: finalize what we have.
-            self.stop.set()
         except GroupOverlapError as exc:
             # Ambiguous assignment is fatal: stop, but still keep collected data.
             print(f"\n    [FATAL] {exc}")
@@ -186,8 +186,34 @@ class Orchestrator:
 
     # -- UI helpers --------------------------------------------------------
 
+    def _install_signal_handlers(self) -> None:
+        # SIGTERM = graceful stop (what the workload-watcher wrapper sends).
+        # SIGINT (Ctrl-C) = graceful on the 1st press, hard abort on the 2nd.
+        signal.signal(signal.SIGTERM, self._on_graceful)
+        signal.signal(signal.SIGINT, self._on_sigint)
+
+    def _on_graceful(self, signum, frame) -> None:
+        if not self.stop.is_set():
+            print("\n  Stop requested — finishing the current iteration and finalizing ...")
+        self.stop.set()
+
+    def _on_sigint(self, signum, frame) -> None:
+        if self.stop.is_set():
+            # Second Ctrl-C: abort now. Kill the in-flight root samplers so nothing
+            # is left running, and exit without finalizing.
+            print("\n  Aborting — killing in-flight samplers, skipping finalize.")
+            terminate_active_children()
+            os._exit(130)
+        print("\n  Stopping — finalizing... (press Ctrl-C again to abort now)")
+        self.stop.set()
+
     def _start_enter_listener(self) -> None:
-        # Read ENTER from the controlling tty so backend subprocesses can't steal it.
+        # Only listen for ENTER when attached to an interactive terminal. When run
+        # in the background (e.g. under the wrapper with stdin from /dev/null), reading
+        # the tty would raise SIGTTIN — the wrapper stops us via SIGTERM instead.
+        if not sys.stdin.isatty():
+            return
+
         def _listen() -> None:
             try:
                 with open("/dev/tty") as tty:
@@ -214,5 +240,8 @@ class Orchestrator:
         print(f"  Run dir    : {self.run_dir}")
         print("=============================================")
         print("  → Start/continue your workload now.")
-        print("  → Press ENTER to stop profiling.")
+        if sys.stdin.isatty():
+            print("  → Press ENTER (or Ctrl-C) to stop; Ctrl-C twice to abort.")
+        else:
+            print("  → Send SIGTERM to stop gracefully; SIGKILL to abort.")
         print("")

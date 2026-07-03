@@ -11,8 +11,43 @@ import os
 import shutil
 import subprocess
 import tempfile
+import threading
 
 from .config import Config
+
+# Long-running sampler children (sudo perf record / sudo gdb loop) are tracked here so
+# an abort (2nd Ctrl-C) can tear them down — they run as root and won't die with us.
+_ACTIVE = set()
+_ACTIVE_LOCK = threading.Lock()
+
+
+def _run_tracked(cmd, **kwargs) -> None:
+    """Run a root sampler in its own session (so it can be killed as a group), and
+    register it while it runs so terminate_active_children() can reach it."""
+    proc = subprocess.Popen(cmd, start_new_session=True, **kwargs)
+    with _ACTIVE_LOCK:
+        _ACTIVE.add(proc)
+    try:
+        proc.wait()
+    finally:
+        with _ACTIVE_LOCK:
+            _ACTIVE.discard(proc)
+
+
+def terminate_active_children() -> None:
+    """Best-effort hard kill of every in-flight sampler process group (as root).
+
+    Called from the abort path. Negative PID targets the whole process group, so the
+    `sudo` wrapper and its perf/gdb child both die (start_new_session made pid == pgid).
+    """
+    with _ACTIVE_LOCK:
+        procs = list(_ACTIVE)
+    for proc in procs:
+        try:
+            subprocess.run(["sudo", "kill", "-KILL", "--", f"-{proc.pid}"],
+                           stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
+        except Exception:
+            pass
 
 
 def profile_once(cfg: Config, pid: int, out_folded: str) -> bool:
@@ -47,8 +82,9 @@ def _profile_perf(cfg: Config, pid: int, out_folded: str) -> bool:
         # "no samples", etc.) instead of a silent empty file.
         with open(errlog, "w") as err:
             # `-- sleep <dur>` bounds the recording to a fixed duration; perf stops
-            # when sleep exits (or earlier if the target dies).
-            subprocess.run(
+            # when sleep exits (or earlier if the target dies). Tracked so an abort
+            # can kill this long-running root process.
+            _run_tracked(
                 ["sudo", "perf", "record",
                  "-F", _int_str(cfg.frequency),
                  "-p", str(pid),
@@ -94,7 +130,7 @@ def _profile_gdb(cfg: Config, pid: int, out_folded: str) -> bool:
     # raw/errlog are opened by us (user-owned); the root loop writes into those fds,
     # so no root-owned files are left behind.
     with open(raw, "w") as raw_fh, open(errlog, "w") as err_fh:
-        subprocess.run(
+        _run_tracked(
             ["sudo", "bash", "-c", _GDB_LOOP, "bash",
              str(pid), str(dur_seconds), _num_str(sleep_between)],
             stdout=raw_fh, stderr=err_fh,

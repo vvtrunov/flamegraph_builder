@@ -52,6 +52,41 @@ python3 -m multi_flamegraph --name nginx --out ./prof --merge-all \
 python3 -m multi_flamegraph --config groups.json --out ./prof --profiler gdb
 ```
 
+## Stopping the profiler
+
+The tool profiles until you stop it. How to stop:
+
+| Action | Effect |
+|--------|--------|
+| **ENTER** (interactive only) | Graceful stop → merge + render flamegraphs. |
+| **`SIGTERM`** (`kill <pid>`) | Same graceful stop — use this for scripted/background runs. |
+| **Ctrl-C once** / 1st `SIGINT` | Graceful stop. |
+| **Ctrl-C twice** / 2nd `SIGINT` | Abort now — kills in-flight `perf`/`gdb` children, **no** flamegraphs. |
+| **`SIGKILL`** (`kill -9`) | OS-forced instant kill; you must `sudo pkill perf`/`gdb` yourself. |
+
+A graceful stop lets the current sampling iteration finish (up to one `--duration`) before
+finalizing. When not attached to a terminal (e.g. under the wrapper below), the ENTER
+listener is skipped and you stop via `SIGTERM`.
+
+### Profile only while a workload runs (`profile_during_workload.sh`)
+
+A checkpointer/daemon never exits, so "profile only during the workload" needs an automatic
+stop. The wrapper script (in the repo root) runs the profiler, watches `ps` for the workload's
+loader process, and sends the graceful stop when it disappears:
+
+```bash
+# defaults target the stroppy loader + the multi_flamegraph command below
+./profile_during_workload.sh
+
+# or customize the workload regexp and the profiler command
+./profile_during_workload.sh --pattern 'stroppy run' --poll 2 -- \
+    python3 -m multi_flamegraph --out ./prof --profiler gdb --merge-all --config ../cfg.json
+```
+
+It authenticates sudo once up front, launches the profiler in the background, waits for a
+process matching `--pattern` (a `pgrep -f` regexp) to appear, then stops the profiler the
+moment no such process remains. Ctrl-C stops early (once = graceful, twice = abort).
+
 ### Options
 
 | Flag | Default | Meaning |
